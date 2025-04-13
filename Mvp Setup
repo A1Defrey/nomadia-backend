@@ -1,0 +1,149 @@
+// === Nomadia MVP Backend Setup ===
+// Project: Nomadia (Flight Search Aggregator with Anonymous Browsing)
+// Environment: Node.js + Playwright + MongoDB
+
+// STEP 1: Install Dependencies
+// Run in terminal:
+// npm init -y
+// npm install express cors dotenv mongoose puppeteer-extra puppeteer-extra-plugin-stealth
+
+// STEP 2: Set Up Express Server (index.js)
+const express = require('express');
+const cors = require('cors');
+const dotenv = require('dotenv');
+dotenv.config();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// Test Route
+app.get('/', (req, res) => {
+  res.send('Nomadia API Running');
+});
+
+// Placeholder for search route
+const searchRoute = require('./routes/search');
+app.use('/api/search', searchRoute);
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+
+// STEP 3: Create routes/search.js
+const express = require('express');
+const router = express.Router();
+const { searchFlights } = require('../services/scraper');
+
+router.post('/', async (req, res) => {
+  const { from, to, date } = req.body;
+  try {
+    const results = await searchFlights(from, to, date);
+    res.json(results);
+  } catch (err) {
+    console.error('Scraping error:', err);
+    res.status(500).json({ error: 'Failed to fetch flights' });
+  }
+});
+
+module.exports = router;
+
+
+// STEP 4: Create services/scraper.js
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
+
+async function scrapeKayak(page, from, to, date) {
+  const url = `https://www.kayak.com/flights/${from}-${to}/${date}`;
+  await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+  await page.waitForTimeout(15000);
+
+  return page.evaluate(() => {
+    const flights = [];
+    document.querySelectorAll('.resultWrapper').forEach(el => {
+      const price = el.querySelector('.price-text')?.innerText;
+      const airline = el.querySelector('.codeshares-airline-names')?.innerText;
+      const depart = el.querySelector('.depart-time')?.innerText;
+      const arrive = el.querySelector('.arrival-time')?.innerText;
+      const link = el.querySelector('a.booking-link')?.href || window.location.href;
+      if (price && airline && depart && arrive) {
+        flights.push({ source: 'Kayak', airline, price, depart, arrive, link });
+      }
+    });
+    return flights;
+  });
+}
+
+async function scrapeWayAway(page, from, to, date) {
+  const url = `https://wayaway.io/flights/${from}-${to}/${date}`;
+  await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+  await page.waitForTimeout(12000);
+  return page.evaluate(() => {
+    const flights = [];
+    document.querySelectorAll('.FlightCard_container').forEach(el => {
+      const airline = el.querySelector('.FlightCard_airlineName')?.innerText;
+      const price = el.querySelector('.FlightCard_price')?.innerText;
+      const depart = el.querySelector('.FlightCard_departureTime')?.innerText;
+      const arrive = el.querySelector('.FlightCard_arrivalTime')?.innerText;
+      const link = document.location.href;
+      if (price && airline && depart && arrive) {
+        flights.push({ source: 'WayAway', airline, price, depart, arrive, link });
+      }
+    });
+    return flights;
+  });
+}
+
+async function scrapeKiwi(page, from, to, date) {
+  const url = `https://www.kiwi.com/en/search/results/${from}/${to}/${date}`;
+  await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+  await page.waitForTimeout(10000);
+  return page.evaluate(() => {
+    const flights = [];
+    document.querySelectorAll('[data-test=ResultCardWrapper]').forEach(el => {
+      const airline = el.querySelector('[data-test=AirlineName]')?.innerText;
+      const price = el.querySelector('[data-test=ResultCardPrice]')?.innerText;
+      const depart = el.querySelector('[data-test=DepartureTime]')?.innerText;
+      const arrive = el.querySelector('[data-test=ArrivalTime]')?.innerText;
+      const link = document.location.href;
+      if (price && airline && depart && arrive) {
+        flights.push({ source: 'Kiwi', airline, price, depart, arrive, link });
+      }
+    });
+    return flights;
+  });
+}
+
+async function searchFlights(from, to, date) {
+  const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox'] });
+  const page = await browser.newPage();
+  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64)');
+
+  const allResults = [];
+  try {
+    const kayakResults = await scrapeKayak(page, from, to, date);
+    allResults.push(...kayakResults);
+  } catch (err) {
+    console.error('Kayak scraping failed:', err);
+  }
+
+  try {
+    const wayawayResults = await scrapeWayAway(page, from, to, date);
+    allResults.push(...wayawayResults);
+  } catch (err) {
+    console.error('WayAway scraping failed:', err);
+  }
+
+  try {
+    const kiwiResults = await scrapeKiwi(page, from, to, date);
+    allResults.push(...kiwiResults);
+  } catch (err) {
+    console.error('Kiwi scraping failed:', err);
+  }
+
+  await browser.close();
+  return allResults.length > 0 ? allResults : [{ source: 'None', airline: 'No data', price: '-', depart: '-', arrive: '-', link: '#' }];
+}
+
+module.exports = { searchFlights };
